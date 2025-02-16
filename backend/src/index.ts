@@ -1,22 +1,28 @@
 import express, { Request, Response } from "express";
 import { z } from "zod";
-import { UserModel } from "./db";
+import { ContentModel, UserModel } from "./db";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
+import { AuthenticatedRequest, userMiddleware } from "./middleware";
+import { Document, Types } from "mongoose";
 
 const app = express();
 
 app.use(express.json());
 app.use(cookieParser());
 
-interface IUser {
-  _id: string;
+interface IUser extends Document {
+  _id: Types.ObjectId;
   email: string;
   password: string;
 }
 
-//@ts-ignore
+interface AuthRequestBody {
+  email: string;
+  password: string;
+}
+
 app.post("/api/v1/signup", async (req: Request, res: Response) => {
   const schema = z.object({
     email: z.string().min(3).max(50).email(),
@@ -26,10 +32,11 @@ app.post("/api/v1/signup", async (req: Request, res: Response) => {
   const parsedBody = schema.safeParse(req.body);
 
   if (!parsedBody.success) {
-    return res.status(400).json({
+    res.status(400).json({
       message: "Invalid request body",
       error: parsedBody.error,
     });
+    return;
   }
 
   const { email, password } = parsedBody.data;
@@ -37,7 +44,8 @@ app.post("/api/v1/signup", async (req: Request, res: Response) => {
     const founduser = await UserModel.findOne({ email });
 
     if (founduser) {
-      return res.status(409).json({ message: "User already exists" });
+      res.status(409).json({ message: "User already exists" });
+      return;
     }
 
     const saltround = 10;
@@ -53,7 +61,6 @@ app.post("/api/v1/signup", async (req: Request, res: Response) => {
   }
 });
 
-//@ts-ignore
 app.post("/api/v1/signin", async (req: Request, res: Response) => {
   const schema = z.object({
     email: z.string().min(3).max(50).email(),
@@ -63,7 +70,8 @@ app.post("/api/v1/signin", async (req: Request, res: Response) => {
   const parsedBody = schema.safeParse(req.body);
 
   if (!parsedBody.success) {
-    return res.status(400).json({ message: "Invalid request body" });
+    res.status(400).json({ message: "Invalid request body" });
+    return;
   }
 
   const { email, password } = parsedBody.data;
@@ -71,18 +79,17 @@ app.post("/api/v1/signin", async (req: Request, res: Response) => {
   try {
     const founduser = (await UserModel.findOne({ email })) as IUser | null;
 
-    if (
-      !founduser ||
-      !(await bcrypt.compareSync(password, founduser.password))
-    ) {
+    if (!founduser || !(await bcrypt.compare(password, founduser.password))) {
       res.status(403).json({ message: "Invalid Credentials" });
+      return;
     }
 
     const JWT_SECRET = process.env.USER_JWT_SECRET;
 
     if (!JWT_SECRET) {
       console.error("USER_JWT_SECRET is missing in environment variables.");
-      return res.status(500).json({ message: "Internal Server Error" });
+      res.status(500).json({ message: "Internal Server Error" });
+      return;
     }
 
     const token = jwt.sign({ id: founduser?._id }, JWT_SECRET, {
@@ -96,23 +103,94 @@ app.post("/api/v1/signin", async (req: Request, res: Response) => {
       maxAge: 172800 * 1000,
     });
     res.status(200).json({ message: "SignIn successful" });
+    return;
   } catch (e) {
     console.log(e);
     res.status(500).json({ message: "Internal Server error" });
+    return;
   }
 });
 
-app.post("/api/v1/content", (req: Request, res: Response) => {
-  const schema = z.object({
-    title: z.string().min(3).max(300),
-    link: z.string().min(3).max(400),
-    type: z.string().min(3).max(20),
-  });
-});
+app.post(
+  "/api/v1/content",
+  userMiddleware,
+  async (req: Request<{}, {}, AuthRequestBody>, res: Response) => {
+    const schema = z.object({
+      title: z.string().min(3).max(300),
+      link: z.string().min(3).max(400),
+      type: z.string().min(3).max(20),
+    });
 
-app.get("/api/v1/content", (req: Request, res: Response) => {});
+    const parsedBody = schema.safeParse(req.body);
+    if (!parsedBody.success) {
+      res
+        .status(400)
+        .json({ message: "Invalid request body", error: parsedBody.error });
+      return;
+    }
 
-app.delete("/api/v1/content", (req: Request, res: Response) => {});
+    const { title, link, type } = parsedBody.data;
+    try {
+      const course = await ContentModel.create({
+        title,
+        link,
+        type,
+        tags: [],
+        userId: req.userId,
+      });
+      res.status(201).json({ message: "Content created successfully" });
+    } catch (e) {
+      console.log(e);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  }
+);
+
+app.get(
+  "/api/v1/content",
+  //@ts-ignore
+  userMiddleware,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = req.userId;
+
+    if (!userId) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+    try {
+      const contet = await ContentModel.find({ userId }).populate(
+        "userId",
+        "username"
+      );
+      res.status(200).json({ content: contet });
+    } catch (e) {
+      console.log(e);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  }
+);
+
+app.delete(
+  "/api/v1/content",
+  //@ts-ignore
+  userMiddleware,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const contentId = req.body.contentId;
+
+    if (!contentId) {
+      res.status(400).json({ message: "Content ID is required" });
+      return;
+    }
+
+    try {
+      await ContentModel.deleteMany({ _id: contentId, userId: req.userId });
+      res.status(200).json({ message: "Content deleted successfully" });
+    } catch (e) {
+      console.log(e);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  }
+);
 
 app.post("/api/v1/brain/share", (req: Request, res: Response) => {});
 
