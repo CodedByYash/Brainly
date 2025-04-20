@@ -4,21 +4,14 @@ import { ContentModel, UserModel } from "./db";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
-import { AuthenticatedRequest, userMiddleware } from "./middleware";
-import { Document, Types } from "mongoose";
+import { AuthRequest, userMiddleware } from "./middleware";
 
 const app = express();
 
 app.use(express.json());
 app.use(cookieParser());
-
-interface IUser extends Document {
-  _id: Types.ObjectId;
-  email: string;
-  password: string;
-}
-
-interface AuthRequestBody {
+interface User {
+  id: string;
   email: string;
   password: string;
 }
@@ -77,7 +70,7 @@ app.post("/api/v1/signin", async (req: Request, res: Response) => {
   const { email, password } = parsedBody.data;
 
   try {
-    const founduser = (await UserModel.findOne({ email })) as IUser | null;
+    const founduser = await UserModel.findOne({ email });
 
     if (!founduser || !(await bcrypt.compare(password, founduser.password))) {
       res.status(403).json({ message: "Invalid Credentials" });
@@ -92,7 +85,7 @@ app.post("/api/v1/signin", async (req: Request, res: Response) => {
       return;
     }
 
-    const token = jwt.sign({ id: founduser?._id }, JWT_SECRET, {
+    const token = jwt.sign({ id: founduser.id }, JWT_SECRET, {
       expiresIn: "2d",
     });
 
@@ -114,7 +107,7 @@ app.post("/api/v1/signin", async (req: Request, res: Response) => {
 app.post(
   "/api/v1/content",
   userMiddleware,
-  async (req: Request<{}, {}, AuthRequestBody>, res: Response) => {
+  async (req: Request, res: Response) => {
     const schema = z.object({
       title: z.string().min(3).max(300),
       link: z.string().min(3).max(400),
@@ -130,13 +123,14 @@ app.post(
     }
 
     const { title, link, type } = parsedBody.data;
+    const authReq = req as AuthRequest;
     try {
       const course = await ContentModel.create({
         title,
         link,
         type,
         tags: [],
-        userId: req.userId,
+        userId: authReq.userId,
       });
       res.status(201).json({ message: "Content created successfully" });
     } catch (e) {
@@ -148,15 +142,11 @@ app.post(
 
 app.get(
   "/api/v1/content",
-  //@ts-ignore
   userMiddleware,
-  async (req: AuthenticatedRequest, res: Response) => {
-    const userId = req.userId;
+  async (req: Request, res: Response) => {
+    const authReq = req as AuthRequest; // Proper casting
+    const userId = authReq.userId;
 
-    if (!userId) {
-      res.status(401).json({ message: "Unauthorized" });
-      return;
-    }
     try {
       const contet = await ContentModel.find({ userId }).populate(
         "userId",
@@ -174,7 +164,9 @@ app.delete(
   "/api/v1/content",
   //@ts-ignore
   userMiddleware,
-  async (req: AuthenticatedRequest, res: Response) => {
+  async (req: Request, res: Response) => {
+    const authReq = req as AuthRequest; // Proper casting
+    const userId = authReq.userId;
     const contentId = req.body.contentId;
 
     if (!contentId) {
@@ -183,7 +175,7 @@ app.delete(
     }
 
     try {
-      await ContentModel.deleteMany({ _id: contentId, userId: req.userId });
+      await ContentModel.deleteMany({ _id: contentId, userId: userId });
       res.status(200).json({ message: "Content deleted successfully" });
     } catch (e) {
       console.log(e);

@@ -1,36 +1,40 @@
-import { NextFunction, Request, Response } from "express";
-import jwt, { JwtPayload } from "jsonwebtoken";
-import { Types } from "mongoose";
-import mongoose from "mongoose";
-import { ObjectId } from "mongodb";
+import express, { NextFunction, Request, Response } from "express";
+import jwt, { Secret } from "jsonwebtoken";
 
-export interface AuthenticatedRequest extends Request {
-  userId: Types.ObjectId;
+interface User {}
+export interface AuthRequest extends Request {
+  userId: string;
 }
-export const userMiddleware = async (
+
+export function userMiddleware(
   req: Request,
   res: Response,
   next: NextFunction
-) => {
-  const token = req.cookies.token;
-
-  if (!token) {
-    return res.status(401).json({ message: "Unauthorized, no token provided" });
-  }
-  const secret = process.env.USER_JWT_SECRET;
-  if (!secret) {
-    console.error("No JWT secret is defined in environment variables");
-    process.exit(1);
-  }
+): void {
   try {
-    const decode = jwt.verify(token, secret) as JwtPayload;
-    if (!decode || decode._id) {
-      return res.status(400).json({ message: "Invalid token" });
+    const authHeader = req.headers.authorization;
+    const cookieToken = req.cookies?.token;
+    if (!authHeader && !cookieToken) {
+      res.status(401).json({ message: "Authorization token required" });
+      return;
     }
-    (req as AuthenticatedRequest).userId = new mongoose.Types.ObjectId(decode._id);
+
+    const token = authHeader
+      ? authHeader.startsWith("Bearer ")
+        ? authHeader.split(" ")[1]
+        : authHeader
+      : cookieToken;
+
+    const decoded = jwt.verify(
+      token,
+      process.env.USER_JWT_SECRET as Secret
+    ) as { id: string };
+
+    (req as any).userId = decoded.id;
+
     next();
-  } catch (e) {
-    console.log("JWT verification failed:", e);
-    return res.status(403).json({ message: "Invalid token" });
+  } catch (error) {
+    console.error("auth middleware error", error);
+    res.status(401).json({ message: "Invalid token" });
   }
-};
+}
